@@ -1,31 +1,9 @@
 /*
- * Copyright (c) 2022, Redis Ltd.
- * Copyright (c) 2016, Salvatore Sanfilippo <antirez at gmail dot com>
+ * Copyright (c) 2016-Present, Redis Ltd.
  * All rights reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * Licensed under your choice of the Redis Source Available License 2.0
+ * (RSALv2) or the Server Side Public License v1 (SSPLv1).
  */
 #include "fmacros.h"
 #include "config.h"
@@ -62,7 +40,7 @@ static sds read_sysfs_line(char *path) {
     return res;
 }
 
-/* Verify our clokcsource implementation doesn't go through a system call (uses vdso).
+/* Verify our clocksource implementation doesn't go through a system call (uses vdso).
  * Going through a system call to check the time degrades Redis performance. */
 static int checkClocksource(sds *error_msg) {
     unsigned long test_time_us, system_hz;
@@ -143,16 +121,19 @@ int checkOvercommit(sds *error_msg) {
     FILE *fp = fopen("/proc/sys/vm/overcommit_memory","r");
     char buf[64];
 
-    if (!fp) return -1;
+    if (!fp) return 0;
     if (fgets(buf,64,fp) == NULL) {
         fclose(fp);
         return 0;
     }
     fclose(fp);
 
-    if (atoi(buf)) {
+    if (strtol(buf, NULL, 10) != 1) {
         *error_msg = sdsnew(
-            "WARNING overcommit_memory is set to 0! Background save may fail under low memory condition. "
+            "Memory overcommit must be enabled! Without it, a background save or replication may fail under low memory condition. "
+#if defined(USE_JEMALLOC)
+            "Being disabled, it can also cause failures without low memory condition, see https://github.com/jemalloc/jemalloc/issues/1328. "
+#endif
             "To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the "
             "command 'sysctl vm.overcommit_memory=1' for this to take effect.");
         return -1;
@@ -351,7 +332,7 @@ check checks[] = {
 int syscheck(void) {
     check *cur_check = checks;
     int ret = 1;
-    sds err_msg;
+    sds err_msg = NULL;
     while (cur_check->check_fn) {
         int res = cur_check->check_fn(&err_msg);
         printf("[%s]...", cur_check->name);

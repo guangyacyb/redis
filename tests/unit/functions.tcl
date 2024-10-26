@@ -38,7 +38,7 @@ start_server {tags {"scripting"}} {
             r function load [get_function_code LUA {bad\0foramat} test {return 'hello1'}]
         } e
         set _ $e
-    } {*Library names can only contain letters and numbers*}
+    } {*Library names can only contain letters, numbers, or underscores(_)*}
 
     test {FUNCTION - Create library with unexisting engine} {
         catch {
@@ -64,7 +64,8 @@ start_server {tags {"scripting"}} {
     } {hello1}
 
     test {FUNCTION - test replace argument with failure keeps old libraries} {
-         catch {r function create LUA test REPLACE {error}}
+        catch {r function load REPLACE [get_function_code LUA test test {error}]} e
+        assert_match {ERR Error compiling function*} $e
         r fcall test 0
     } {hello1}
 
@@ -209,14 +210,14 @@ start_server {tags {"scripting"}} {
 
     test {FUNCTION - test fcall_ro with write command} {
         r function load REPLACE [get_no_writes_function_code lua test test {return redis.call('set', 'x', '1')}]
-        catch { r fcall_ro test 0 } e
+        catch { r fcall_ro test 1 x } e
         set _ $e
     } {*Write commands are not allowed from read-only scripts*}
 
     test {FUNCTION - test fcall_ro with read only commands} {
         r function load REPLACE [get_no_writes_function_code lua test test {return redis.call('get', 'x')}]
         r set x 1
-        r fcall_ro test 0
+        r fcall_ro test 1 x
     } {1}
 
     test {FUNCTION - test keys and argv} {
@@ -291,6 +292,31 @@ start_server {tags {"scripting"}} {
         assert_match {{library_name test engine LUA functions {{name test description {} flags {}}}}} [r function list]
         r function flush sync
         assert_match {} [r function list]
+    }
+
+    test {FUNCTION - async function flush rebuilds Lua VM without causing race condition between main and lazyfree thread} {
+        # LAZYFREE_THRESHOLD is 64
+        for {set i 0} {$i < 1000} {incr i} {
+            r function load [get_function_code lua test$i test$i {local a = 1 while true do a = a + 1 end}]
+        }
+        assert_morethan [s used_memory_vm_functions] 100000
+        r config resetstat
+        r function flush async
+        assert_lessthan [s used_memory_vm_functions] 40000
+
+        # Wait for the completion of lazy free for both functions and engines.
+        set start_time [clock seconds]
+        while {1} {
+            # Tests for race conditions between async function flushes and main thread Lua VM operations.
+            r function load REPLACE [get_function_code lua test test {local a = 1 while true do a = a + 1 end}]
+            if {[s lazyfreed_objects] == 1001 || [expr {[clock seconds] - $start_time}] > 5} {
+                break
+            }
+        }
+        if {[s lazyfreed_objects] != 1001} {
+            error "Timeout or unexpected number of lazyfreed_objects: [s lazyfreed_objects]"
+        }
+        assert_match {{library_name test engine LUA functions {{name test description {} flags {}}}}} [r function list]
     }
 
     test {FUNCTION - test function wrong argument} {
@@ -410,7 +436,7 @@ start_server {tags {"scripting repl external:skip"}} {
 
         test "FUNCTION - function effect is replicated to replica" {
             r function load REPLACE [get_function_code LUA test test {return redis.call('set', 'x', '1')}]
-            r fcall test 0
+            r fcall test 1 x
             assert {[r get x] eq {1}}
             wait_for_condition 150 100 {
                 [r -1 get x] eq {1}
@@ -421,7 +447,7 @@ start_server {tags {"scripting repl external:skip"}} {
 
         test "FUNCTION - modify key space of read only replica" {
             catch {
-                r -1 fcall test 0
+                r -1 fcall test 1 x
             } e
             set _ $e
         } {READONLY You can't write against a read only replica.}
@@ -597,7 +623,7 @@ start_server {tags {"scripting"}} {
             }
         } e
         set _ $e
-    } {*Function names can only contain letters and numbers and must be at least one character long*}
+    } {*Library names can only contain letters, numbers, or underscores(_) and must be at least one character long*}
 
     test {LIBRARIES - test registration with empty name} {
         catch {
@@ -606,7 +632,7 @@ start_server {tags {"scripting"}} {
             }
         } e
         set _ $e
-    } {*Function names can only contain letters and numbers and must be at least one character long*}
+    } {*Library names can only contain letters, numbers, or underscores(_) and must be at least one character long*}
 
     test {LIBRARIES - math.random from function load} {
         catch {
@@ -643,6 +669,15 @@ start_server {tags {"scripting"}} {
         } e
         set _ $e
     } {*attempted to access nonexistent global variable 'set_repl'*}
+
+    test {LIBRARIES - redis.acl_check_cmd from function load} {
+        catch {
+            r function load replace {#!lua name=lib2
+                return redis.acl_check_cmd('set','xx',1)
+            }
+        } e
+        set _ $e
+    } {*attempted to access nonexistent global variable 'acl_check_cmd'*}
 
     test {LIBRARIES - malicious access test} {
         # the 'library' API is not exposed inside a
@@ -1028,7 +1063,7 @@ start_server {tags {"scripting"}} {
                 callback = function() return redis.call('set', 'x', 1) end
             }
         }
-        catch {r fcall_ro f1 0} e
+        catch {r fcall_ro f1 1 x} e
         set _ $e
     } {*Can not execute a script with write flag using \*_ro command*}
 
@@ -1040,7 +1075,7 @@ start_server {tags {"scripting"}} {
                 flags = {'no-writes'}
             }
         }
-        catch {r fcall f1 0} e
+        catch {r fcall f1 1 x} e
         set _ $e
     } {*Write commands are not allowed from read-only scripts*}
 
@@ -1051,7 +1086,7 @@ start_server {tags {"scripting"}} {
 
         r config set maxmemory 1
 
-        catch {[r fcall f1 1 k]} e
+        catch {[r fcall f1 1 x]} e
         assert_match {OOM *when used memory > 'maxmemory'*} $e
 
         r config set maxmemory 0
@@ -1086,7 +1121,7 @@ start_server {tags {"scripting"}} {
 
         assert_equal {hello} [r fcall f2 0]
 
-        catch {[r fcall f3 0]} e
+        catch {[r fcall f3 1 x]} e
         assert_match {ERR *Can not execute the command on a stale replica*} $e
 
         assert_match {*redis_version*} [r fcall f4 0]

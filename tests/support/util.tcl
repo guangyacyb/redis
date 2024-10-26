@@ -62,8 +62,8 @@ proc sanitizer_errors_from_file {filename} {
         }
 
         # GCC UBSAN output does not contain 'Sanitizer' but 'runtime error'.
-        if {[string match {*runtime error*} $log] ||
-            [string match {*Sanitizer*} $log]} {
+        if {[string match {*runtime error*} $line] ||
+            [string match {*Sanitizer*} $line]} {
             return $log
         }
     }
@@ -72,14 +72,8 @@ proc sanitizer_errors_from_file {filename} {
 }
 
 proc getInfoProperty {infostr property} {
-    if {[regexp "\r\n$property:(.*?)\r\n" $infostr _ value]} {
-        set _ $value
-    }
-}
-
-proc cluster_info {r field} {
-    if {[regexp "^$field:(.*?)\r\n" [$r cluster info] _ value]} {
-        set _ $value
+    if {[regexp -lineanchor "^$property:(.*?)\r\n" $infostr _ value]} {
+        return $value
     }
 }
 
@@ -164,7 +158,7 @@ proc count_log_lines {srv_idx} {
 # returns the number of times a line with that pattern appears in a file
 proc count_message_lines {file pattern} {
     set res 0
-    # exec fails when grep exists with status other than 0 (when the patter wasn't found)
+    # exec fails when grep exists with status other than 0 (when the pattern wasn't found)
     catch {
         set res [string trim [exec grep $pattern $file 2> /dev/null | wc -l]]
     }
@@ -299,6 +293,8 @@ proc findKeyWithType {r type} {
 
 proc createComplexDataset {r ops {opt {}}} {
     set useexpire [expr {[lsearch -exact $opt useexpire] != -1}]
+    set usehexpire [expr {[lsearch -exact $opt usehexpire] != -1}]
+
     if {[lsearch -exact $opt usetag] != -1} {
         set tag "{t}"
     } else {
@@ -392,6 +388,10 @@ proc createComplexDataset {r ops {opt {}}} {
             {hash} {
                 randpath {{*}$r hset $k $f $v} \
                         {{*}$r hdel $k $f}
+
+                if { [{*}$r hexists $k $f] && $usehexpire && rand() < 0.5} {
+                    {*}$r hexpire $k 1000 FIELDS 1 $f
+                }
             }
         }
     }
@@ -444,8 +444,14 @@ proc csvdump r {
                 hash {
                     set fields [{*}$r hgetall $k]
                     set newfields {}
-                    foreach {k v} $fields {
-                        lappend newfields [list $k $v]
+                    foreach {f v} $fields {
+                        set expirylist [{*}$r hexpiretime $k FIELDS 1 $f]
+                        if {$expirylist eq (-1)} {
+                            lappend newfields [list $f $v]
+                        } else {
+                            set e [lindex $expirylist 0]
+                            lappend newfields [list $f $e $v] # TODO: extract the actual ttl value from the list in $e
+                        }
                     }
                     set fields [lsort -index 0 $newfields]
                     foreach kv $fields {
@@ -479,8 +485,9 @@ proc find_available_port {start count} {
             set port $start
         }
         set fd1 -1
-        if {[catch {set fd1 [socket -server 127.0.0.1 $port]}] ||
-            [catch {set fd2 [socket -server 127.0.0.1 [expr $port+10000]]}]} {
+        proc dummy_accept {chan addr port} {}
+        if {[catch {set fd1 [socket -server dummy_accept -myaddr 127.0.0.1 $port]}] ||
+            [catch {set fd2 [socket -server dummy_accept -myaddr 127.0.0.1 [expr $port+10000]]}]} {
             if {$fd1 != -1} {
                 close $fd1
             }
@@ -608,15 +615,32 @@ proc stop_bg_complex_data {handle} {
 # Write num keys with the given key prefix and value size (in bytes). If idx is
 # given, it's the index (AKA level) used with the srv procedure and it specifies
 # to which Redis instance to write the keys.
-proc populate {num {prefix key:} {size 3} {idx 0}} {
-    set rd [redis_deferring_client $idx]
-    for {set j 0} {$j < $num} {incr j} {
-        $rd set $prefix$j [string repeat A $size]
+proc populate {num {prefix key:} {size 3} {idx 0} {prints false} {expires 0}} {
+    r $idx deferred 1
+    if {$num > 16} {set pipeline 16} else {set pipeline $num}
+    set val [string repeat A $size]
+    for {set j 0} {$j < $pipeline} {incr j} {
+        if {$expires > 0} {
+            r $idx set $prefix$j $val ex $expires
+        } else {
+            r $idx set $prefix$j $val
+        }
+        if {$prints} {puts $j}
     }
-    for {set j 0} {$j < $num} {incr j} {
-        $rd read
+    for {} {$j < $num} {incr j} {
+        if {$expires > 0} {
+            r $idx set $prefix$j $val ex $expires
+        } else {
+            r $idx set $prefix$j $val
+        }
+        r $idx read
+        if {$prints} {puts $j}
     }
-    $rd close
+    for {set j 0} {$j < $pipeline} {incr j} {
+        r $idx read
+        if {$prints} {puts $j}
+    }
+    r $idx deferred 0
 }
 
 proc get_child_pid {idx} {
@@ -631,6 +655,29 @@ proc get_child_pid {idx} {
     close $fd
 
     return $child_pid
+}
+
+proc process_is_alive pid {
+    if {[catch {exec ps -p $pid -f} err]} {
+        return 0
+    } else {
+        if {[string match "*<defunct>*" $err]} { return 0 }
+        return 1
+    }
+}
+
+proc pause_process pid {
+    exec kill -SIGSTOP $pid
+    wait_for_condition 50 100 {
+        [string match {*T*} [lindex [exec ps j $pid] 16]]
+    } else {
+        puts [exec ps j $pid]
+        fail "process didn't stop"
+    }
+}
+
+proc resume_process pid {
+    exec kill -SIGCONT $pid
 }
 
 proc cmdrstat {cmd r} {
@@ -651,7 +698,7 @@ proc latencyrstat_percentiles {cmd r} {
     }
 }
 
-proc generate_fuzzy_traffic_on_key {key duration} {
+proc generate_fuzzy_traffic_on_key {key type duration} {
     # Commands per type, blocking commands removed
     # TODO: extract these from COMMAND DOCS, and improve to include other types
     set string_commands {APPEND BITCOUNT BITFIELD BITOP BITPOS DECR DECRBY GET GETBIT GETRANGE GETSET INCR INCRBY INCRBYFLOAT MGET MSET MSETNX PSETEX SET SETBIT SETEX SETNX SETRANGE LCS STRLEN}
@@ -662,7 +709,6 @@ proc generate_fuzzy_traffic_on_key {key duration} {
     set stream_commands {XACK XADD XCLAIM XDEL XGROUP XINFO XLEN XPENDING XRANGE XREAD XREADGROUP XREVRANGE XTRIM}
     set commands [dict create string $string_commands hash $hash_commands zset $zset_commands list $list_commands set $set_commands stream $stream_commands]
 
-    set type [r type $key]
     set cmds [dict get $commands $type]
     set start_time [clock seconds]
     set sent {}
@@ -727,13 +773,20 @@ proc generate_fuzzy_traffic_on_key {key duration} {
         } else {
             set err [format "%s" $err] ;# convert to string for pattern matching
             if {[string match "*SIGTERM*" $err]} {
-                puts "command caused test to hang? $cmd"
-                exit 1
+                puts "commands caused test to hang:"
+                foreach cmd $sent {
+                    foreach arg $cmd {
+                        puts -nonewline "[string2printable $arg] "
+                    }
+                    puts ""
+                }
+                # Re-raise, let handler up the stack take care of this.
+                error $err $::errorInfo
             }
         }
     }
 
-    # print stats so that we know if we managed to generate commands that actually made senes
+    # print stats so that we know if we managed to generate commands that actually made sense
     #if {$::verbose} {
     #    set count [llength $sent]
     #    puts "Fuzzy traffic sent: $count, succeeded: $succeeded"
@@ -868,19 +921,27 @@ proc debug_digest {{level 0}} {
     r $level debug digest
 }
 
-proc wait_for_blocked_client {} {
+proc wait_for_blocked_client {{idx 0}} {
     wait_for_condition 50 100 {
-        [s blocked_clients] ne 0
+        [s $idx blocked_clients] ne 0
     } else {
         fail "no blocked clients"
     }
 }
 
-proc wait_for_blocked_clients_count {count {maxtries 100} {delay 10}} {
+proc wait_for_blocked_clients_count {count {maxtries 100} {delay 10} {idx 0}} {
     wait_for_condition $maxtries $delay  {
-        [s blocked_clients] == $count
+        [s $idx blocked_clients] == $count
     } else {
         fail "Timeout waiting for blocked clients"
+    }
+}
+
+proc wait_for_watched_clients_count {count {maxtries 100} {delay 10} {idx 0}} {
+    wait_for_condition $maxtries $delay  {
+        [s $idx watching_clients] == $count
+    } else {
+        fail "Timeout waiting for watched clients"
     }
 }
 
@@ -932,6 +993,12 @@ proc config_set {param value {options {}}} {
             }
         }
     }
+}
+
+proc config_get_set {param value {options {}}} {
+    set config [lindex [r config get $param] 1]
+    config_set $param $value $options
+    return $config
 }
 
 proc delete_lines_with_pattern {filename tmpfilename pattern} {
@@ -1044,4 +1111,60 @@ proc memory_usage {key} {
         set usage 1
     }
     return $usage
+}
+
+# forward compatibility, lmap missing in TCL 8.5
+proc lmap args {
+    set body [lindex $args end]
+    set args [lrange $args 0 end-1]
+    set n 0
+    set pairs [list]
+    foreach {varnames listval} $args {
+        set varlist [list]
+        foreach varname $varnames {
+            upvar 1 $varname var$n
+            lappend varlist var$n
+            incr n
+        }
+        lappend pairs $varlist $listval
+    }
+    set temp [list]
+    foreach {*}$pairs {
+        lappend temp [uplevel 1 $body]
+    }
+    set temp
+}
+
+proc format_command {args} {
+    set cmd "*[llength $args]\r\n"
+    foreach a $args {
+        append cmd "$[string length $a]\r\n$a\r\n"
+    }
+    set _ $cmd
+}
+
+# Returns whether or not the system supports stack traces
+proc system_backtrace_supported {} {
+    set system_name [string tolower [exec uname -s]]
+    if {$system_name eq {darwin}} {
+        return 1
+    } elseif {$system_name ne {linux}} {
+        return 0
+    }
+
+    # libmusl does not support backtrace. Also return 0 on
+    # static binaries (ldd exit code 1) where we can't detect libmusl
+    if {![catch {set ldd [exec ldd src/redis-server]}]} {
+        if {![string match {*libc.*musl*} $ldd]} {
+            return 1
+        }
+    }
+    return 0
+}
+
+proc generate_largevalue_test_array {} {
+    array set largevalue {}
+    set largevalue(listpack) "hello"
+    set largevalue(quicklist) [string repeat "x" 8192]
+    return [array get largevalue]
 }
