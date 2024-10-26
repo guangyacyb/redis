@@ -56,12 +56,17 @@ typedef struct aeFileEvent {
 } aeFileEvent;
 
 /* Time event structure */
+// 时间事件结构
 typedef struct aeTimeEvent {
     long long id; /* time event identifier. */
+    // 事件到达时间，单位秒
     monotime when;
+    // 到达时的回调函数
     aeTimeProc *timeProc;
     aeEventFinalizerProc *finalizerProc;
+    // 回调参数
     void *clientData;
+    // 时间事件双向链表指针
     struct aeTimeEvent *prev;
     struct aeTimeEvent *next;
     int refcount; /* refcount to prevent timer events from being
