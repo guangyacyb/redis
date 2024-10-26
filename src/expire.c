@@ -184,6 +184,7 @@ static inline void activeExpireHashFieldCycle(int type) {
     }
 }
 
+// 定期删除
 void activeExpireCycle(int type) {
     /* Adjust the running parameters according to the configured expire
      * effort. The default effort is 1, and the maximum configurable effort
@@ -201,11 +202,14 @@ void activeExpireCycle(int type) {
 
     /* This function has some global state in order to continue the work
      * incrementally across calls. */
+    /* current_db 上次定期删除遍历到的数据库ID */
     static unsigned int current_db = 0; /* Next DB to test. */
     static int timelimit_exit = 0;      /* Time limit hit in previous call? */
+    /* last_fast_cycle 上一次执行快速定期删除的时间点 */
     static long long last_fast_cycle = 0; /* When last fast cycle ran. */
 
     int j, iteration = 0;
+    // 每次定期删除，遍历的数据库的数量
     int dbs_per_call = CRON_DBS_PER_CALL;
     int dbs_performed = 0;
     long long start = ustime(), timelimit, elapsed;
@@ -244,6 +248,7 @@ void activeExpireCycle(int type) {
      * time per iteration. Since this function gets called with a frequency of
      * server.hz times per second, the following is the max amount of
      * microseconds we can spend in this function. */
+    // 慢速定期删除的执行时长
     timelimit = config_cycle_slow_time_perc*1000000/server.hz/100;
     timelimit_exit = 0;
     if (timelimit <= 0) timelimit = 1;
@@ -310,6 +315,7 @@ void activeExpireCycle(int type) {
             data.sampled = 0;
             data.expired = 0;
 
+            // 每个数据库中检查的键的数量
             if (num > config_keys_per_loop)
                 num = config_keys_per_loop;
 
@@ -328,6 +334,7 @@ void activeExpireCycle(int type) {
 
             int origin_ttl_samples = data.ttl_samples;
 
+            // 从数据库中随机选取 num 个键进行检查
             while (data.sampled < num && checked_buckets < max_buckets) {
                 db->expires_cursor = kvstoreScan(db->expires, db->expires_cursor, -1, expireScanCallback, isExpiryDictValidForSamplingCb, &data);
                 if (db->expires_cursor == 0) {

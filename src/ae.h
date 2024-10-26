@@ -76,15 +76,23 @@ typedef struct aeFiredEvent {
 
 /* State of an event based program */
 typedef struct aeEventLoop {
+    // 注册的fd 最大值
     int maxfd;   /* highest file descriptor currently registered */
+    // 监听的fd 的数量
     int setsize; /* max number of file descriptors tracked */
+    // 下一个时间事件的id，没创建一个都+1
     long long timeEventNextId;
+    // 已注册的文件事件数组
     aeFileEvent *events; /* Registered events */
+    // 触发的事件数组
     aeFiredEvent *fired; /* Fired events */
+    // 时间事件链表表头
     aeTimeEvent *timeEventHead;
     int stop;
     void *apidata; /* This is used for polling API specific data */
+    // 事件循环休眠之前调用的方法
     aeBeforeSleepProc *beforesleep;
+    // 事件循环唤醒后调用的方法
     aeBeforeSleepProc *aftersleep;
     int flags;
 } aeEventLoop;

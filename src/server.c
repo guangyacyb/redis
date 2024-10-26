@@ -2030,7 +2030,7 @@ void freeServerClientMemUsageBuckets(void) {
     zfree(server.client_mem_usage_buckets);
     server.client_mem_usage_buckets = NULL;
 }
-
+//初始化服务器配置 main 调用
 void initServerConfig(void) {
     int j;
     char *default_bindaddr[CONFIG_DEFAULT_BINDADDR_COUNT] = CONFIG_DEFAULT_BINDADDR;
@@ -2588,6 +2588,7 @@ void makeThreadKillable(void) {
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 }
 
+// 初始化服务器，处理模块、加载aof、rdb 文件等
 void initServer(void) {
     int j;
 
@@ -6990,6 +6991,7 @@ int main(int argc, char **argv) {
     char *exec_name = strrchr(argv[0], '/');
     if (exec_name == NULL) exec_name = argv[0];
     server.sentinel_mode = checkForSentinelMode(argc,argv, exec_name);
+    //初始化服务器配置
     initServerConfig();
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the
                   basic networking code and client creation depends on it. */
@@ -7006,6 +7008,7 @@ int main(int argc, char **argv) {
     /* We need to init sentinel right now as parsing the configuration file
      * in sentinel mode will have the effect of populating the sentinel
      * data structures with master nodes to monitor. */
+    // 如果是哨兵模式，加载哨兵配置并初始化哨兵
     if (server.sentinel_mode) {
         initSentinelConfig();
         initSentinel();
@@ -7014,6 +7017,7 @@ int main(int argc, char **argv) {
     /* Check if we need to start in redis-check-rdb/aof mode. We just execute
      * the program main. However the program is part of the Redis executable
      * so that we can easily execute an RDB check on loading errors. */
+    // 对 rdb aof 进行检查
     if (strstr(exec_name,"redis-check-rdb") != NULL)
         redis_check_rdb_main(argc,argv,NULL);
     else if (strstr(exec_name,"redis-check-aof") != NULL)
@@ -7134,6 +7138,7 @@ int main(int argc, char **argv) {
             j++;
         }
 
+        // 加载所有配置
         loadServerConfig(server.configfile, config_from_stdin, options);
         if (server.sentinel_mode) loadSentinelConfigFromQueue();
         sdsfree(options);
@@ -7186,6 +7191,7 @@ int main(int argc, char **argv) {
         serverLog(LL_NOTICE, "Configuration loaded");
     }
 
+    // 初始化服务器，处理模块、加载aof、rdb 文件等
     initServer();
     if (background || server.pidfile) createPidFile();
     if (server.set_proc_title) redisSetProcTitle(NULL);
@@ -7248,6 +7254,7 @@ int main(int argc, char **argv) {
     redisSetCpuAffinity(server.server_cpulist);
     setOOMScoreAdj(-1);
 
+    // 事件驱动框架，重点
     aeMain(server.el);
     aeDeleteEventLoop(server.el);
     return 0;

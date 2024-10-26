@@ -633,6 +633,7 @@ loaderr:
  * empty. This way loadServerConfig can be used to just load a file or
  * just load a string. */
 #define CONFIG_READ_LEN 1024
+// 加载服务器配置 main 调用
 void loadServerConfig(char *filename, char config_from_stdin, char *options) {
     sds config = sdsempty();
     char buf[CONFIG_READ_LEN+1];

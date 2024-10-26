@@ -1971,8 +1971,10 @@ int keyIsExpired(redisDb *db, robj *key) {
  * The return value of the function is KEY_VALID if the key is still valid.
  * The function returns KEY_EXPIRED if the key is expired BUT not deleted,
  * or returns KEY_DELETED if the key is expired and deleted. */
+// 惰性删除
 keyStatus expireIfNeeded(redisDb *db, robj *key, int flags) {
     if (server.lazy_expire_disabled) return KEY_VALID;
+    // 检查key是否过期
     if (!keyIsExpired(db,key)) return KEY_VALID;
 
     /* If we are running in the context of a replica, instead of
@@ -1989,7 +1991,9 @@ keyStatus expireIfNeeded(redisDb *db, robj *key, int flags) {
      * When replicating commands from the master, keys are never considered
      * expired. */
     if (server.masterhost != NULL) {
+        // 从节点不主动删除，由 master 发来 del 命令删除
         if (server.current_client && (server.current_client->flags & CLIENT_MASTER)) return KEY_VALID;
+        // 不删除而只返回过期错误
         if (!(flags & EXPIRE_FORCE_DELETE_EXPIRED)) return KEY_EXPIRED;
     }
 
@@ -2009,6 +2013,7 @@ keyStatus expireIfNeeded(redisDb *db, robj *key, int flags) {
         key = createStringObject(key->ptr, sdslen(key->ptr));
     }
     /* Delete the key */
+    // 删除key，并广播删除过期key事件
     deleteExpiredKeyAndPropagate(db,key);
     if (static_key) {
         decrRefCount(key);
